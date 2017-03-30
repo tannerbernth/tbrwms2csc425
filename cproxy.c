@@ -13,23 +13,27 @@ int main(int argc, char *argv[]){
 		newSocket;
 	struct sockaddr_in serverAddr;
 	struct sockaddr_in telnetAddr;
-	struct sockaddr_storage telnetStorage;
 	socklen_t addr_size;
 	socklen_t addr_size2;
 
-	int telnetSock = socket (PF_INET, SOCK_STREAM, 0);
-
 	// build the struct for the server ------------------------------------------
-	int serverSock = socket (PF_INET, SOCK_STREAM, 0);
-
-	memset(serverAddr.sin_zero, '\0', sizeof serverAddr.sin_zero);
+	memset(&serverAddr, 0, sizeof(serverAddr));
 	serverAddr.sin_family = AF_INET;
 	serverAddr.sin_port = htons(sport);
-	serverAddr.sin_addr.s_addr = inet_addr(sip);
+
+	if (inet_pton(AF_INET, sip, &serverAddr.sin_addr) < 1) {
+		fprintf(stderr, "Error with sproxy IP address\n");
+		exit(1);
+	}
+
+	int serverSock = socket (AF_INET, SOCK_STREAM, 0);
+	if (serverSock < 0) {
+		fprintf(stderr, "Error creating server socket \n");
+		exit(1);
+	}
 
 	// connect to the server
-	addr_size = sizeof serverAddr;
-	if (connect(serverSock, (struct sockaddr *)  &serverAddr, addr_size) < 0) {
+	if (connect(serverSock, (struct sockaddr *)  &serverAddr, sizeof(serverAddr)) < 0) {
 		fprintf(stderr,"Error connecting to sproxy\n");
 		exit(1);
 	}
@@ -37,19 +41,31 @@ int main(int argc, char *argv[]){
 	//---------------------------------------------------------------------------
 
 	//build the struct for client to listen to telnet ---------------------------
+	memset(&telnetAddr, 0, sizeof(telnetAddr));
 	telnetAddr.sin_family = AF_INET;
+	telnetAddr.sin_addr.s_addr = INADDR_ANY;
 	telnetAddr.sin_port = htons(tnport);
-	telnetAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
-	memset(telnetAddr.sin_zero, '\0', sizeof telnetAddr.sin_zero);
 
-	// start listening
-	bind(telnetSock, (struct sockaddr *) &telnetAddr, sizeof(telnetAddr));
-
-	if(listen(telnetSock,5)!=0){
-		printf("Error\n");
-	} else {
-		printf("Listen on port %d\n",tnport);
+	int telnetSock = socket (AF_INET, SOCK_STREAM, 0);
+	if (telnetSock < 0) {
+		fprintf(stderr,"Error with telnet socket\n");
+		exit(1);
 	}
+
+	int yes = 1;
+	if (setsockopt(telnetSock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) == -1) {
+		fprintf(stderr,"Error resetting socket\n");
+    	exit(1);
+	}
+	// start listening
+	if (bind(telnetSock, (struct sockaddr *) &telnetAddr, sizeof(telnetAddr)) < 0) {
+		fprintf(stderr, "Error binding telnet socket\n");
+		exit(1);
+	}
+
+	listen(telnetSock,100);
+	printf("Listen on port %d\n",tnport);
+
 	addr_size2 = sizeof(telnetAddr);
 	newSocket = accept(telnetSock, (struct sockaddr *) &telnetAddr, &addr_size2);
 	if (newSocket < 0) {
@@ -68,24 +84,24 @@ int main(int argc, char *argv[]){
 
 	while (1) {
 		FD_ZERO(&readfds);
+		FD_SET(newSocket, &readfds);
 		FD_SET(serverSock, &readfds);
-		FD_SET(telnetSock, &readfds);
 		tv.tv_sec = 1;
 		tv.tv_usec = 0;
-		if (serverSock > telnetSock) n = serverSock+1;
-		else n = telnetSock+1;
-		int rv = select(n, &readfds, NULL, NULL, &tv);
-		if (rv == -1) {
+		int maxfd;
+		if (newSocket > serverSock) maxfd = newSocket+1;
+		else maxfd = serverSock+1;
+		n = select(maxfd, &readfds, NULL, NULL, &tv);
+		if (n == -1) {
 			fprintf(stderr,"Error: select failed\n");
 			exit(1);
-		} else if (rv == 0) {
+		} else if (n == 0) {
 			printf("Timeout occured\n");
 		} else {
 			// If receive data from telnet, send to server
-			if(FD_ISSET(telnetSock,&readfds)) {
+			if(FD_ISSET(newSocket,&readfds)) {
 				memset(telnetBuffer, 0, sizeof(telnetBuffer));
-				telnetBytes = recv(telnetSock,telnetBuffer,sizeof(telnetBuffer), 0);
-				printf("telnetBytes %d telnetBuffer %d\n",telnetBytes, telnetBuffer);
+				telnetBytes = recv(newSocket,telnetBuffer,sizeof(telnetBuffer), 0);
 				if (telnetBytes > 0) {
 					send(serverSock,telnetBuffer,telnetBytes,0);
 					telnetBytes = 0;
@@ -97,7 +113,7 @@ int main(int argc, char *argv[]){
 				sproxyBytes =recv(serverSock,sproxyBuffer,sizeof(sproxyBuffer),0);
 				
 				if (sproxyBytes > 0) {
-					send(telnetSock,telnetBuffer,sizeof(telnetBuffer),0);
+					send(newSocket,sproxyBuffer,sizeof(sproxyBuffer),0);
 					sproxyBytes = 0;
 				}
 			}

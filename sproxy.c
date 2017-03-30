@@ -14,14 +14,10 @@ int main(int argc, char *argv[]){
 
 	int clientSock, newSocket;
 	struct sockaddr_in serverAddr;
-	struct sockaddr_storage serverStorage;
 	socklen_t addr_size;
 	int sport = atoi(argv[1]);
 
-	clientSock = socket(PF_INET, SOCK_STREAM, 0);
-
 	// build the struct for connection to telnet daemon -------------------------
-	int daemonSock = socket(PF_INET, SOCK_STREAM, 0);
 	struct sockaddr_in telnetAddr;
 
 	memset(&telnetAddr, '\0', sizeof(telnetAddr));
@@ -33,8 +29,13 @@ int main(int argc, char *argv[]){
 		exit(1);
 	}
 
+	int daemonSock = socket(AF_INET, SOCK_STREAM, 0);
+	if (daemonSock < 0) {
+		fprintf(stderr, "Error with telnet daemon\n");
+		exit(1);
+	}
+
 	// connect to the telnet daemon
-	addr_size = sizeof serverAddr;
 	if (connect(daemonSock, (struct sockaddr *)  &telnetAddr, sizeof(telnetAddr)) < 0) {
 		fprintf(stderr, "Error connecting to telnet daemon\n");
 		exit(1);
@@ -44,21 +45,29 @@ int main(int argc, char *argv[]){
 	// build struct for server --------------------------------------------------
 	memset(&serverAddr, '\0', sizeof(serverAddr));
 	serverAddr.sin_family = AF_INET;
+	serverAddr.sin_addr.s_addr = INADDR_ANY;//inet_addr("127.0.0.1");
 	serverAddr.sin_port = htons(sport);
-	serverAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+	clientSock = socket(AF_INET, SOCK_STREAM, 0);
+	if (clientSock < 0) {
+		fprintf(stderr, "Error with cproxy socket\n");
+		exit(1);
+	}
 	
+	int yes = 1;
+	if (setsockopt(clientSock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) == -1) {
+    	fprintf(stderr,"Error resetting socket\n");
+    	exit(1);
+	}
 	// start listening for client 
 	if (bind(clientSock, (struct sockaddr *) &serverAddr, sizeof(serverAddr)) < 0) {
 		fprintf(stderr,"Error binding to cproxy socket\n");
 		exit(1);
 	}
-	if(listen(clientSock,5000)!=0){
-		printf("Error\n");
-	} else {
-		printf("Listen on port %d\n",sport);
-	}
-	addr_size = sizeof(serverStorage);
-	newSocket = accept(clientSock, (struct sockaddr *) &serverStorage, &addr_size);
+	listen(clientSock,5000);
+	printf("Listen on port %d\n",sport);
+	addr_size = sizeof(serverAddr);
+	newSocket = accept(clientSock, (struct sockaddr *) &serverAddr, &addr_size);
 	if (newSocket < 0) {
 		fprintf(stderr, "Error: could not connect with cproxy\n");
 		exit(1);
@@ -76,25 +85,26 @@ int main(int argc, char *argv[]){
 
 	while (1) {
 		FD_ZERO(&readfds);
-		FD_SET(clientSock, &readfds);
+		FD_SET(newSocket, &readfds);
 		FD_SET(daemonSock, &readfds);
 		tv.tv_sec = 1;
 		tv.tv_usec = 0;
-		if (clientSock > daemonSock) n = clientSock+1;
-		else n = daemonSock+1;
-		int rv = select(n, &readfds, NULL, NULL, &tv);
-		if (rv == -1) {
+		int maxfd;
+		if (newSocket > daemonSock) maxfd = newSocket+1;
+		else maxfd = daemonSock+1;
+		n = select(maxfd, &readfds, NULL, NULL, &tv);
+		if (n == -1) {
 			fprintf(stderr,"Error: select failed\n");
 			exit(1);
-		} else if (rv == 0) {
+		} else if (n == 0) {
 			printf("Timeout occured");
 		} else {
 			// If receive data from client, print it
-			if (FD_ISSET(clientSock, &readfds)) {
+			if (FD_ISSET(newSocket, &readfds)) {
 				memset(cproxyBuffer, 0, sizeof(cproxyBuffer));
-				cproxyBytes = recv(clientSock,cproxyBuffer,sizeof(cproxyBuffer),0);
+				cproxyBytes = recv(newSocket,cproxyBuffer,sizeof(cproxyBuffer),0);
 				if (cproxyBytes > 0) {
-					send(clientSock,cproxyBuffer,sizeof(cproxyBuffer),0);
+					send(daemonSock,cproxyBuffer,sizeof(cproxyBuffer),0);
 					cproxyBytes = 0;
 				}
 			}
@@ -103,7 +113,7 @@ int main(int argc, char *argv[]){
 				memset(telnetBuffer, 0, sizeof(telnetBuffer));
 				telnetBytes = recv(daemonSock, telnetBuffer, sizeof(telnetBuffer), 0);
 				if (telnetBytes > 0) {
-					send(daemonSock,telnetBuffer,sizeof(telnetBuffer),0);
+					send(newSocket,telnetBuffer,sizeof(telnetBuffer),0);
 					telnetBytes = 0;
 				}
 			}
